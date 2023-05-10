@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -16,9 +18,18 @@ const (
 	ImgDir = "images"
 )
 
-type Response struct {
-	Message string `json:"message"`
-}
+type (
+	Response struct {
+		Message string `json:"message"`
+	}
+	Items struct {
+		Items []Item `json:"items"`
+	}
+	Item struct {
+		Name     string `json:"name"`
+		Category string `json:"category"`
+	}
+)
 
 func root(c echo.Context) error {
 	res := Response{Message: "Hello, world!"}
@@ -28,7 +39,11 @@ func root(c echo.Context) error {
 func addItem(c echo.Context) error {
 	// Get form data
 	name := c.FormValue("name")
+	category := c.FormValue("category")
 	c.Logger().Infof("Receive item: %s", name)
+	c.Logger().Infof("Receive category: %s", category)
+
+	updateJson(name, category)
 
 	message := fmt.Sprintf("item received: %s", name)
 	res := Response{Message: message}
@@ -49,6 +64,35 @@ func getImg(c echo.Context) error {
 		imgPath = path.Join(ImgDir, "default.jpg")
 	}
 	return c.File(imgPath)
+}
+
+func updateJson(name string, category string) {
+	jsonFile, err := os.Open("items.json")
+	if err != nil {
+		fmt.Println("Cannot open the json file", err)
+		return
+	}
+	defer jsonFile.Close()
+
+	jsonData, err := ioutil.ReadAll(jsonFile)
+	if err != nil {
+		fmt.Println("Cannot read data", err)
+		return
+	}
+
+	var items Items
+
+	json.Unmarshal(jsonData, &items)
+	items.Items = append(items.Items, Item{Name: name, Category: category})
+	marshaled, err := json.Marshal(items)
+	if err != nil {
+		fmt.Println("Cannot marshal data", err)
+		return
+	}
+	if err = ioutil.WriteFile("items.json", marshaled, 0644); err != nil {
+		fmt.Println("Cannot write data", err)
+		return
+	}
 }
 
 func main() {
@@ -72,7 +116,6 @@ func main() {
 	e.GET("/", root)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
-
 
 	// Start server
 	e.Logger.Fatal(e.Start(":9000"))
