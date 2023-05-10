@@ -51,6 +51,27 @@ func addItem(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
+func getItems(c echo.Context) error {
+	jsonFile, err := os.Open("items.json")
+	if err != nil {
+		fmt.Println("Cannot open the json file", err)
+		return err
+	}
+	defer jsonFile.Close()
+
+	jsonData, err := ioutil.ReadAll(jsonFile)
+	if err != nil {
+		fmt.Println("Cannot read data", err)
+		return err
+	}
+
+	var items Items
+
+	json.Unmarshal(jsonData, &items)
+
+	return c.JSON(http.StatusOK, items)
+}
+
 func getImg(c echo.Context) error {
 	// Create image path
 	imgPath := path.Join(ImgDir, c.Param("imageFilename"))
@@ -114,6 +135,7 @@ func main() {
 
 	// Routes
 	e.GET("/", root)
+	e.GET("/items", getItems)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
 
