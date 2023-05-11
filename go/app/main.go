@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -20,6 +21,7 @@ import (
 const (
 	ImgDir         = "images"
 	ImgDirRelative = "../" + ImgDir
+	ItemFile       = "items.json"
 )
 
 type (
@@ -64,7 +66,7 @@ func addItem(c echo.Context) error {
 }
 
 func getItems(c echo.Context) error {
-	jsonFile, err := os.Open("items.json")
+	jsonFile, err := os.Open(ItemFile)
 	if err != nil {
 		fmt.Println("Cannot open the json file", err)
 		return err
@@ -82,6 +84,31 @@ func getItems(c echo.Context) error {
 	json.Unmarshal(jsonData, &items)
 
 	return c.JSON(http.StatusOK, items)
+}
+
+func getItemsByID(c echo.Context) error {
+	id := c.Param("itemID")
+	jsonFile, err := os.Open(ItemFile)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, err)
+	}
+
+	defer jsonFile.Close()
+
+	jsonData, err := ioutil.ReadAll(jsonFile)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, err)
+	}
+
+	var items Items
+	json.Unmarshal(jsonData, &items)
+
+	for i, item := range items.Items {
+		if strconv.Itoa(i) == id {
+			return c.JSON(http.StatusOK, item)
+		}
+	}
+	return c.JSON(http.StatusNotFound, nil)
 }
 
 func getImg(c echo.Context) error {
@@ -102,7 +129,7 @@ func getImg(c echo.Context) error {
 func updateJson(name string, category string, image *multipart.FileHeader) {
 	hashedFileName := sha256.Sum256([]byte(image.Filename))
 
-	jsonFile, err := os.Open("items.json")
+	jsonFile, err := os.Open(ItemFile)
 	if err != nil {
 		fmt.Println("Cannot open the json file: ", err)
 		return
@@ -124,7 +151,7 @@ func updateJson(name string, category string, image *multipart.FileHeader) {
 		fmt.Println("Cannot marshal data: ", err)
 		return
 	}
-	if err = ioutil.WriteFile("items.json", marshaled, 0644); err != nil {
+	if err = ioutil.WriteFile(ItemFile, marshaled, 0644); err != nil {
 		fmt.Println("Cannot write data: ", err)
 		return
 	}
@@ -174,6 +201,7 @@ func main() {
 	// Routes
 	e.GET("/", root)
 	e.GET("/items", getItems)
+	e.GET("/items/:itemID", getItemsByID)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
 
