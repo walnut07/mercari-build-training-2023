@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -21,16 +20,12 @@ import (
 const (
 	ImgDir         = "images"
 	ImgDirRelative = "../" + ImgDir
-	ItemFile       = "items.json"
 	ItemsTable     = "../../db/items.db"
 )
 
 type (
 	Response struct {
 		Message string `json:"message"`
-	}
-	Items struct {
-		Items []Item `json:"items"`
 	}
 	Item struct {
 		ID            int    `json:"id"`
@@ -72,9 +67,9 @@ func addItem(c echo.Context) error {
 }
 
 func getItems(c echo.Context) error {
-	db, err := sql.Open("sqlite3", ItemsTable)
+	db, err := setUpDB()
 	if err != nil {
-		c.Logger().Errorf("Failed to open database: %s", err)
+		c.Logger().Errorf("Failed to set up database: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
@@ -104,8 +99,8 @@ func getItemByID(c echo.Context) error {
 
 	db, err := sql.Open("sqlite3", ItemsTable)
 	if err != nil {
-		c.Logger().Errorf("Failed to open database: %s", err)
-		return err
+		c.Logger().Errorf("Failed to set up database: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
 	}
 
 	row := db.QueryRow("SELECT * FROM items WHERE id = ?", id)
@@ -143,9 +138,9 @@ func getImg(c echo.Context) error {
 func searchItems(c echo.Context) error {
 	keyword := c.QueryParam("keyword")
 
-	db, err := sql.Open("sqlite3", ItemsTable)
+	db, err := setUpDB()
 	if err != nil {
-		c.Logger().Errorf("Failed to open database: %s", err)
+		c.Logger().Errorf("Failed to set up database: %s", err)
 	}
 
 	rows, err := db.Query("SELECT * FROM items WHERE name LIKE ? ", "%"+keyword+"%")
@@ -177,23 +172,17 @@ func addItemToDatabase(name string, category string, image *multipart.FileHeader
 		return fmt.Errorf("image extension is not jpg")
 	}
 
-	db, err := sql.Open("sqlite3", ItemsTable)
+	db, err := setUpDB()
 	if err != nil {
 		return err
 	}
-
-	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT, imageFileName TEXT)")
-	if err != nil {
-		return err
-	}
-	statement.Exec()
 
 	item := Item{}
 	item.Name = name
 	item.Category = category
 	item.ImageFileName = fmt.Sprintf("%x.jpg", hashedFileName)
 
-	statement, _ = db.Prepare("INSERT INTO items (name, category, imageFileName) VALUES (?, ?, ?)")
+	statement, _ := db.Prepare("INSERT INTO items (name, category, imageFileName) VALUES (?, ?, ?)")
 	statement.Exec(item.Name, item.Category, item.ImageFileName)
 
 	return nil
@@ -223,20 +212,21 @@ func saveImageToLocal(image *multipart.FileHeader) {
 	}
 }
 
-func readItems() ([]byte, error) {
-	jsonFile, err := os.Open(ItemFile)
+func setUpDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", ItemsTable)
 	if err != nil {
 		return nil, err
 	}
 
-	defer jsonFile.Close()
+	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT, imageFileName TEXT)")
+	defer statement.Close()
 
-	jsonData, err := ioutil.ReadAll(jsonFile)
 	if err != nil {
 		return nil, err
 	}
+	statement.Exec()
 
-	return jsonData, nil
+	return db, nil
 }
 
 func main() {
