@@ -133,6 +133,36 @@ func getImg(c echo.Context) error {
 	return c.File(imgPath)
 }
 
+func searchItems(c echo.Context) error {
+	keyword := c.QueryParam("keyword")
+
+	db, err := sql.Open("sqlite3", ItemsTable)
+	if err != nil {
+		c.Logger().Errorf("Failed to open database: %s", err)
+	}
+
+	rows, err := db.Query("SELECT * FROM items WHERE name LIKE ? ", "%"+keyword+"%")
+	if err != nil {
+		c.Logger().Errorf("Failed to get items: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
+
+	defer rows.Close()
+	var items []Item
+	for rows.Next() {
+		var item Item
+		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+		if err != nil {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
+		} else {
+			items = append(items, item)
+		}
+	}
+
+	return c.JSON(http.StatusOK, items)
+}
+
 func addItemToDatabase(name string, category string, image *multipart.FileHeader) error {
 	hashedFileName := sha256.Sum256([]byte(image.Filename))
 	ext := path.Ext(image.Filename)
@@ -225,6 +255,7 @@ func main() {
 	e.GET("/items/:itemID", getItemByID)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
+	e.GET("/search", searchItems)
 
 	// Start server
 	e.Logger.Fatal(e.Start(":9000"))
