@@ -20,14 +20,14 @@ import (
 const (
 	ImgDir         = "images"
 	ImgDirRelative = "../" + ImgDir
-	ItemsTable     = "../../db/items.db"
+	DBDir          = "../../db/mercari.sqlite3"
 )
 
 type (
 	Response struct {
 		Message string `json:"message"`
 	}
-	Item struct {
+	JoinedItem struct {
 		ID            int    `json:"id"`
 		Name          string `json:"name"`
 		Category      string `json:"category"`
@@ -73,15 +73,15 @@ func getItems(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	rows, err := db.Query("SELECT * FROM items")
+	rows, err := db.Query("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id")
 	if err != nil {
 		c.Logger().Errorf("Failed to get items: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 	defer rows.Close()
-	var items []Item
+	var items []JoinedItem
 	for rows.Next() {
-		var item Item
+		var item JoinedItem
 		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
 		if err != nil {
 			c.Logger().Errorf("Failed to get item: %s", err)
@@ -97,15 +97,15 @@ func getItems(c echo.Context) error {
 func getItemByID(c echo.Context) error {
 	id := c.Param("itemID")
 
-	db, err := sql.Open("sqlite3", ItemsTable)
+	db, err := sql.Open("sqlite3", DBDir)
 	if err != nil {
 		c.Logger().Errorf("Failed to set up database: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	row := db.QueryRow("SELECT * FROM items WHERE id = ?", id)
+	row := db.QueryRow("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id", id)
 	var item Item
-	err = row.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+	err = row.Scan(&item.ID, &item.Name, &item.CategoryID, &item.ImageFileName)
 	if err != nil {
 		if err.Error() == sql.ErrNoRows.Error() {
 			c.Logger().Errorf("Item not found: %s", err)
@@ -143,16 +143,16 @@ func searchItems(c echo.Context) error {
 		c.Logger().Errorf("Failed to set up database: %s", err)
 	}
 
-	rows, err := db.Query("SELECT * FROM items WHERE name LIKE ? ", "%"+keyword+"%")
+	rows, err := db.Query("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id WHERE items.name LIKE ?", "%"+keyword+"%")
 	if err != nil {
 		c.Logger().Errorf("Failed to get items: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
 	defer rows.Close()
-	var items []Item
+	var items []JoinedItem
 	for rows.Next() {
-		var item Item
+		var item JoinedItem
 		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
 		if err != nil {
 			c.Logger().Errorf("Failed to get item: %s", err)
@@ -177,13 +177,39 @@ func addItemToDatabase(name string, category string, image *multipart.FileHeader
 		return err
 	}
 
+	// get category id
+	var categoryModel Category
+	var categoryId int64
+	categoryModel.Name = category
+
+	row := db.QueryRow("SELECT * FROM category WHERE name = ?", category)
+	err = row.Scan(&categoryModel.ID, &categoryModel.Name)
+	if err == nil {
+		categoryId = int64(categoryModel.ID)
+	} else {
+		if err.Error() != sql.ErrNoRows.Error() {
+			return fmt.Errorf("failed to get category: %s", err)
+		} else {
+			res, err := db.Exec("INSERT INTO category (name) VALUES (?)", categoryModel.Name)
+			if err != nil {
+				return fmt.Errorf("failed to insert category: %s", err)
+			}
+			if categoryId, err = res.LastInsertId(); err != nil {
+				return fmt.Errorf("failed to get last inserted id: %s", err)
+			}
+		}
+	}
+
 	item := Item{}
 	item.Name = name
-	item.Category = category
+	item.CategoryID = int(categoryId)
 	item.ImageFileName = fmt.Sprintf("%x.jpg", hashedFileName)
 
-	statement, _ := db.Prepare("INSERT INTO items (name, category, imageFileName) VALUES (?, ?, ?)")
-	statement.Exec(item.Name, item.Category, item.ImageFileName)
+	statement, _ := db.Prepare("INSERT INTO items (name, categoryId, imageFileName) VALUES (?, ?, ?)")
+	_, err = statement.Exec(item.Name, item.CategoryID, item.ImageFileName)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -213,14 +239,22 @@ func saveImageToLocal(image *multipart.FileHeader) {
 }
 
 func setUpDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", ItemsTable)
+	db, err := sql.Open("sqlite3", DBDir)
 	if err != nil {
 		return nil, err
 	}
 
-	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT, imageFileName TEXT)")
-	defer statement.Close()
+	if _, err = db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return nil, err
+	}
 
+	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+	if err != nil {
+		return nil, err
+	}
+	statement.Exec()
+
+	statement, err = db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, categoryId INTEGER, imageFileName TEXT, FOREIGN KEY(categoryId) REFERENCES category(id))")
 	if err != nil {
 		return nil, err
 	}
