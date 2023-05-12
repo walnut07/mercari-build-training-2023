@@ -68,15 +68,14 @@ func addItem(c echo.Context) error {
 func getItems(c echo.Context) error {
 	jsonFile, err := os.Open(ItemFile)
 	if err != nil {
-		fmt.Println("Cannot open the json file", err)
-		return err
+		return c.JSON(http.StatusBadRequest, err)
 	}
+
 	defer jsonFile.Close()
 
-	jsonData, err := ioutil.ReadAll(jsonFile)
+	jsonData, err := readItems()
 	if err != nil {
-		fmt.Println("Cannot read data", err)
-		return err
+		return c.JSON(http.StatusInternalServerError, err)
 	}
 
 	var items Items
@@ -95,7 +94,7 @@ func getItemsByID(c echo.Context) error {
 
 	defer jsonFile.Close()
 
-	jsonData, err := ioutil.ReadAll(jsonFile)
+	jsonData, err := readItems()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err)
 	}
@@ -108,6 +107,7 @@ func getItemsByID(c echo.Context) error {
 			return c.JSON(http.StatusOK, item)
 		}
 	}
+
 	return c.JSON(http.StatusNotFound, nil)
 }
 
@@ -123,38 +123,42 @@ func getImg(c echo.Context) error {
 		c.Logger().Debugf("Image not found: %s", imgPath)
 		imgPath = path.Join(ImgDir, "default.jpg")
 	}
+
 	return c.File(imgPath)
 }
 
-func updateJson(name string, category string, image *multipart.FileHeader) {
+func updateJson(name string, category string, image *multipart.FileHeader) error {
 	hashedFileName := sha256.Sum256([]byte(image.Filename))
+	ext := path.Ext(image.Filename)
+	if ext != ".jpg" {
+		return fmt.Errorf("image extension is not jpg")
+	}
 
 	jsonFile, err := os.Open(ItemFile)
 	if err != nil {
-		fmt.Println("Cannot open the json file: ", err)
-		return
+		return err
 	}
+
 	defer jsonFile.Close()
 
-	jsonData, err := ioutil.ReadAll(jsonFile)
+	jsonData, err := readItems()
 	if err != nil {
-		fmt.Println("Cannot read data: ", err)
-		return
+		return err
 	}
 
 	var items Items
 
 	json.Unmarshal(jsonData, &items)
-	items.Items = append(items.Items, Item{Name: name, Category: category, ImageFileName: fmt.Sprintf("%x.jpg", hashedFileName)})
+	items.Items = append(items.Items, Item{Name: name, Category: category, ImageFileName: fmt.Sprintf("%x%s", hashedFileName, ext)})
 	marshaled, err := json.Marshal(items)
 	if err != nil {
-		fmt.Println("Cannot marshal data: ", err)
-		return
+		return err
 	}
 	if err = ioutil.WriteFile(ItemFile, marshaled, 0644); err != nil {
-		fmt.Println("Cannot write data: ", err)
-		return
+		return err
 	}
+
+	return nil
 }
 
 func saveImageToLocal(image *multipart.FileHeader) {
@@ -179,6 +183,22 @@ func saveImageToLocal(image *multipart.FileHeader) {
 		fmt.Println("Cannot copy image: ", err)
 		return
 	}
+}
+
+func readItems() ([]byte, error) {
+	jsonFile, err := os.Open(ItemFile)
+	if err != nil {
+		return nil, err
+	}
+
+	defer jsonFile.Close()
+
+	jsonData, err := ioutil.ReadAll(jsonFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return jsonData, nil
 }
 
 func main() {
