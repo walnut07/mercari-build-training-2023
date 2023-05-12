@@ -27,6 +27,16 @@ type (
 	Response struct {
 		Message string `json:"message"`
 	}
+	Item struct {
+		ID            int    `json:"id"`
+		Name          string `json:"name"`
+		CategoryID    int    `json:"categoryID"`
+		ImageFileName string `json:"imageFileName"`
+	}
+	Category struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
 	JoinedItem struct {
 		ID            int    `json:"id"`
 		Name          string `json:"name"`
@@ -103,9 +113,9 @@ func getItemByID(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	row := db.QueryRow("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id", id)
-	var item Item
-	err = row.Scan(&item.ID, &item.Name, &item.CategoryID, &item.ImageFileName)
+	row := db.QueryRow("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id WHERE items.id = ?", id)
+	var item JoinedItem
+	err = row.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
 	if err != nil {
 		if err.Error() == sql.ErrNoRows.Error() {
 			c.Logger().Errorf("Item not found: %s", err)
