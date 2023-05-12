@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,18 +11,19 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
 	ImgDir         = "images"
 	ImgDirRelative = "../" + ImgDir
 	ItemFile       = "items.json"
+	ItemsTable     = "../../db/items.db"
 )
 
 type (
@@ -32,6 +34,7 @@ type (
 		Items []Item `json:"items"`
 	}
 	Item struct {
+		ID            int    `json:"id"`
 		Name          string `json:"name"`
 		Category      string `json:"category"`
 		ImageFileName string `json:"imageFileName"`
@@ -56,7 +59,11 @@ func addItem(c echo.Context) error {
 	c.Logger().Infof("Receive category: %s", category)
 	c.Logger().Infof("Receive image: %s", image.Filename)
 
-	updateJson(name, category, image)
+	err := addItemToDatabase(name, category, image)
+	if err != nil {
+		c.Logger().Errorf("Failed to add item to database: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
 	saveImageToLocal(image)
 
 	message := fmt.Sprintf("item received: %s", name)
@@ -85,30 +92,29 @@ func getItems(c echo.Context) error {
 	return c.JSON(http.StatusOK, items)
 }
 
-func getItemsByID(c echo.Context) error {
+func getItemByID(c echo.Context) error {
 	id := c.Param("itemID")
-	jsonFile, err := os.Open(ItemFile)
+
+	db, err := sql.Open("sqlite3", ItemsTable)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, err)
+		c.Logger().Errorf("Failed to open database: %s", err)
+		return err
 	}
 
-	defer jsonFile.Close()
-
-	jsonData, err := readItems()
+	row := db.QueryRow("SELECT * FROM items WHERE id = ?", id)
+	var item Item
+	err = row.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, err)
-	}
-
-	var items Items
-	json.Unmarshal(jsonData, &items)
-
-	for i, item := range items.Items {
-		if strconv.Itoa(i) == id {
-			return c.JSON(http.StatusOK, item)
+		if err.Error() == sql.ErrNoRows.Error() {
+			c.Logger().Errorf("Item not found: %s", err)
+			return c.JSON(http.StatusNotFound, err)
+		} else {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
 		}
 	}
 
-	return c.JSON(http.StatusNotFound, nil)
+	return c.JSON(http.StatusOK, item)
 }
 
 func getImg(c echo.Context) error {
@@ -127,36 +133,31 @@ func getImg(c echo.Context) error {
 	return c.File(imgPath)
 }
 
-func updateJson(name string, category string, image *multipart.FileHeader) error {
+func addItemToDatabase(name string, category string, image *multipart.FileHeader) error {
 	hashedFileName := sha256.Sum256([]byte(image.Filename))
 	ext := path.Ext(image.Filename)
 	if ext != ".jpg" {
 		return fmt.Errorf("image extension is not jpg")
 	}
 
-	jsonFile, err := os.Open(ItemFile)
+	db, err := sql.Open("sqlite3", ItemsTable)
 	if err != nil {
 		return err
 	}
 
-	defer jsonFile.Close()
-
-	jsonData, err := readItems()
+	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT, imageFileName TEXT)")
 	if err != nil {
 		return err
 	}
+	statement.Exec()
 
-	var items Items
+	item := Item{}
+	item.Name = name
+	item.Category = category
+	item.ImageFileName = fmt.Sprintf("%x.jpg", hashedFileName)
 
-	json.Unmarshal(jsonData, &items)
-	items.Items = append(items.Items, Item{Name: name, Category: category, ImageFileName: fmt.Sprintf("%x%s", hashedFileName, ext)})
-	marshaled, err := json.Marshal(items)
-	if err != nil {
-		return err
-	}
-	if err = ioutil.WriteFile(ItemFile, marshaled, 0644); err != nil {
-		return err
-	}
+	statement, _ = db.Prepare("INSERT INTO items (name, category, imageFileName) VALUES (?, ?, ?)")
+	statement.Exec(item.Name, item.Category, item.ImageFileName)
 
 	return nil
 }
@@ -221,7 +222,7 @@ func main() {
 	// Routes
 	e.GET("/", root)
 	e.GET("/items", getItems)
-	e.GET("/items/:itemID", getItemsByID)
+	e.GET("/items/:itemID", getItemByID)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
 
