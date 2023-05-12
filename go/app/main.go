@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -73,21 +72,29 @@ func addItem(c echo.Context) error {
 }
 
 func getItems(c echo.Context) error {
-	jsonFile, err := os.Open(ItemFile)
+	db, err := sql.Open("sqlite3", ItemsTable)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, err)
-	}
-
-	defer jsonFile.Close()
-
-	jsonData, err := readItems()
-	if err != nil {
+		c.Logger().Errorf("Failed to open database: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	var items Items
-
-	json.Unmarshal(jsonData, &items)
+	rows, err := db.Query("SELECT * FROM items")
+	if err != nil {
+		c.Logger().Errorf("Failed to get items: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
+	defer rows.Close()
+	var items []Item
+	for rows.Next() {
+		var item Item
+		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+		if err != nil {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
+		} else {
+			items = append(items, item)
+		}
+	}
 
 	return c.JSON(http.StatusOK, items)
 }
