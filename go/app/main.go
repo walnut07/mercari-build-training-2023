@@ -2,36 +2,43 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
+	"database/sql"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
 	ImgDir         = "images"
 	ImgDirRelative = "../" + ImgDir
-	ItemFile       = "items.json"
+	DBDir          = "../../db/mercari.sqlite3"
 )
 
 type (
 	Response struct {
 		Message string `json:"message"`
 	}
-	Items struct {
-		Items []Item `json:"items"`
-	}
 	Item struct {
+		ID            int    `json:"id"`
+		Name          string `json:"name"`
+		CategoryID    int    `json:"categoryID"`
+		ImageFileName string `json:"imageFileName"`
+	}
+	Category struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	JoinedItem struct {
+		ID            int    `json:"id"`
 		Name          string `json:"name"`
 		Category      string `json:"category"`
 		ImageFileName string `json:"imageFileName"`
@@ -56,7 +63,11 @@ func addItem(c echo.Context) error {
 	c.Logger().Infof("Receive category: %s", category)
 	c.Logger().Infof("Receive image: %s", image.Filename)
 
-	updateJson(name, category, image)
+	err := addItemToDatabase(name, category, image)
+	if err != nil {
+		c.Logger().Errorf("Failed to add item to database: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
 	saveImageToLocal(image)
 
 	message := fmt.Sprintf("item received: %s", name)
@@ -66,49 +77,56 @@ func addItem(c echo.Context) error {
 }
 
 func getItems(c echo.Context) error {
-	jsonFile, err := os.Open(ItemFile)
+	db, err := setUpDB()
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, err)
-	}
-
-	defer jsonFile.Close()
-
-	jsonData, err := readItems()
-	if err != nil {
+		c.Logger().Errorf("Failed to set up database: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	var items Items
-
-	json.Unmarshal(jsonData, &items)
+	rows, err := db.Query("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id")
+	if err != nil {
+		c.Logger().Errorf("Failed to get items: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
+	defer rows.Close()
+	var items []JoinedItem
+	for rows.Next() {
+		var item JoinedItem
+		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+		if err != nil {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
+		} else {
+			items = append(items, item)
+		}
+	}
 
 	return c.JSON(http.StatusOK, items)
 }
 
-func getItemsByID(c echo.Context) error {
+func getItemByID(c echo.Context) error {
 	id := c.Param("itemID")
-	jsonFile, err := os.Open(ItemFile)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, err)
-	}
 
-	defer jsonFile.Close()
-
-	jsonData, err := readItems()
+	db, err := sql.Open("sqlite3", DBDir)
 	if err != nil {
+		c.Logger().Errorf("Failed to set up database: %s", err)
 		return c.JSON(http.StatusInternalServerError, err)
 	}
 
-	var items Items
-	json.Unmarshal(jsonData, &items)
-
-	for i, item := range items.Items {
-		if strconv.Itoa(i) == id {
-			return c.JSON(http.StatusOK, item)
+	row := db.QueryRow("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id WHERE items.id = ?", id)
+	var item JoinedItem
+	err = row.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+	if err != nil {
+		if err.Error() == sql.ErrNoRows.Error() {
+			c.Logger().Errorf("Item not found: %s", err)
+			return c.JSON(http.StatusNotFound, err)
+		} else {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
 		}
 	}
 
-	return c.JSON(http.StatusNotFound, nil)
+	return c.JSON(http.StatusOK, item)
 }
 
 func getImg(c echo.Context) error {
@@ -127,34 +145,79 @@ func getImg(c echo.Context) error {
 	return c.File(imgPath)
 }
 
-func updateJson(name string, category string, image *multipart.FileHeader) error {
+func searchItems(c echo.Context) error {
+	keyword := c.QueryParam("keyword")
+
+	db, err := setUpDB()
+	if err != nil {
+		c.Logger().Errorf("Failed to set up database: %s", err)
+	}
+
+	rows, err := db.Query("SELECT items.id, items.name, category.name, items.imageFileName FROM items JOIN category ON items.categoryId = category.id WHERE items.name LIKE ?", "%"+keyword+"%")
+	if err != nil {
+		c.Logger().Errorf("Failed to get items: %s", err)
+		return c.JSON(http.StatusInternalServerError, err)
+	}
+
+	defer rows.Close()
+	var items []JoinedItem
+	for rows.Next() {
+		var item JoinedItem
+		err = rows.Scan(&item.ID, &item.Name, &item.Category, &item.ImageFileName)
+		if err != nil {
+			c.Logger().Errorf("Failed to get item: %s", err)
+			return c.JSON(http.StatusInternalServerError, err)
+		} else {
+			items = append(items, item)
+		}
+	}
+
+	return c.JSON(http.StatusOK, items)
+}
+
+func addItemToDatabase(name string, category string, image *multipart.FileHeader) error {
 	hashedFileName := sha256.Sum256([]byte(image.Filename))
 	ext := path.Ext(image.Filename)
 	if ext != ".jpg" {
 		return fmt.Errorf("image extension is not jpg")
 	}
 
-	jsonFile, err := os.Open(ItemFile)
+	db, err := setUpDB()
 	if err != nil {
 		return err
 	}
 
-	defer jsonFile.Close()
+	// get category id
+	var categoryModel Category
+	var categoryId int64
+	categoryModel.Name = category
 
-	jsonData, err := readItems()
-	if err != nil {
-		return err
+	row := db.QueryRow("SELECT * FROM category WHERE name = ?", category)
+	err = row.Scan(&categoryModel.ID, &categoryModel.Name)
+	if err == nil {
+		categoryId = int64(categoryModel.ID)
+	} else {
+		if err.Error() != sql.ErrNoRows.Error() {
+			return fmt.Errorf("failed to get category: %s", err)
+		} else {
+			res, err := db.Exec("INSERT INTO category (name) VALUES (?)", categoryModel.Name)
+			if err != nil {
+				return fmt.Errorf("failed to insert category: %s", err)
+			}
+			if categoryId, err = res.LastInsertId(); err != nil {
+				return fmt.Errorf("failed to get last inserted id: %s", err)
+			}
+		}
 	}
 
-	var items Items
+	item := Item{}
+	item.Name = name
+	item.CategoryID = int(categoryId)
+	item.ImageFileName = fmt.Sprintf("%x.jpg", hashedFileName)
 
-	json.Unmarshal(jsonData, &items)
-	items.Items = append(items.Items, Item{Name: name, Category: category, ImageFileName: fmt.Sprintf("%x%s", hashedFileName, ext)})
-	marshaled, err := json.Marshal(items)
+	statement, _ := db.Prepare("INSERT INTO items (name, categoryId, imageFileName) VALUES (?, ?, ?)")
+	_, err = statement.Exec(item.Name, item.CategoryID, item.ImageFileName)
 	if err != nil {
-		return err
-	}
-	if err = ioutil.WriteFile(ItemFile, marshaled, 0644); err != nil {
 		return err
 	}
 
@@ -185,20 +248,29 @@ func saveImageToLocal(image *multipart.FileHeader) {
 	}
 }
 
-func readItems() ([]byte, error) {
-	jsonFile, err := os.Open(ItemFile)
+func setUpDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", DBDir)
 	if err != nil {
 		return nil, err
 	}
 
-	defer jsonFile.Close()
-
-	jsonData, err := ioutil.ReadAll(jsonFile)
-	if err != nil {
+	if _, err = db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return nil, err
 	}
 
-	return jsonData, nil
+	statement, err := db.Prepare("CREATE TABLE IF NOT EXISTS category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+	if err != nil {
+		return nil, err
+	}
+	statement.Exec()
+
+	statement, err = db.Prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, categoryId INTEGER, imageFileName TEXT, FOREIGN KEY(categoryId) REFERENCES category(id))")
+	if err != nil {
+		return nil, err
+	}
+	statement.Exec()
+
+	return db, nil
 }
 
 func main() {
@@ -221,9 +293,10 @@ func main() {
 	// Routes
 	e.GET("/", root)
 	e.GET("/items", getItems)
-	e.GET("/items/:itemID", getItemsByID)
+	e.GET("/items/:itemID", getItemByID)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
+	e.GET("/search", searchItems)
 
 	// Start server
 	e.Logger.Fatal(e.Start(":9000"))
